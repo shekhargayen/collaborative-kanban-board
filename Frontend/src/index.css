@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Dark mode is driven by a `dark` class on <html> (toggle in the header). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --animate-flash: flash 1.6s ease-out;
+  --animate-slide-in: slide-in 0.2s ease-out;
+  --animate-fade-in: fade-in 0.15s ease-out;
+  --animate-pop-in: pop-in 0.15s ease-out;
+
+  @keyframes flash {
+    0% { box-shadow: 0 0 0 3px rgb(56 189 248 / 0.9); background-color: var(--flash-bg); }
+    100% { box-shadow: 0 0 0 0 rgb(56 189 248 / 0); }
+  }
+  @keyframes slide-in {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pop-in {
+    from { opacity: 0; transform: translate(-50%, -48%) scale(0.97); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  }
+}
+
+html, body, #root { height: 100%; }
+:root { --flash-bg: rgb(240 249 255); color-scheme: light; }
+:root.dark { --flash-bg: rgb(12 74 110); color-scheme: dark; }
+body { @apply bg-slate-100 text-slate-900 antialiased transition-colors dark:bg-slate-950 dark:text-slate-100; }

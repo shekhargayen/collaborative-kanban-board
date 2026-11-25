@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Priority {
+  low
+  medium
+  high
+}
+
+/// Column a task belongs to. Order of the board: backlog -> todo -> in_progress -> done
+enum Status {
+  backlog
+  todo
+  in_progress
+  done
+}
+
+model Task {
+  id          String   @id @default(uuid())
+  title       String
+  description String   @default("")
+  priority    Priority @default(medium)
+  assignee    String   @default("")
+  status      Status   @default(backlog)
+  /// Fractional index: order within a column (ascending)
+  position    Float
+  /// Incremented on every write; used for conflict detection and stale-event filtering
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, position])
+}
