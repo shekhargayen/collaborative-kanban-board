@@ -2,12 +2,163 @@
 
 A real-time collaborative Kanban board. Several users can view and edit the same board at once, and changes made by others appear without a page reload.
 
+**Stack:** React 18 + TypeScript + Vite · TanStack Query · dnd-kit · Tailwind CSS · Node.js + Express · PostgreSQL + Prisma · Server-Sent Events
 
+## Contents
 
+1. [How to install and run the project](#1-how-to-install-and-run-the-project)
+2. [What is complete and what is not](#2-what-is-complete-and-what-is-not)
+3. [How I handled optimistic updates and rollback](#3-how-i-handled-optimistic-updates-and-rollback)
+4. [How I handled real-time events without overwriting local changes](#4-how-i-handled-real-time-events-without-overwriting-local-changes)
+5. [Which coding agents I used](#5-which-coding-agents-i-used)
+6. [Reference: tech stack, project structure, API, configuration](#reference)
 
 ---
 
-## Tech stack
+## 1. How to install and run the project
+
+### Prerequisites
+
+- **Node.js 20+** (developed on Node 24)
+- **Docker** to run PostgreSQL locally. Or use any PostgreSQL 14+ database and set `DATABASE_URL` yourself.
+
+### Steps
+
+```bash
+# 1. Clone and start PostgreSQL (from the repo root)
+git clone <repo-url>
+cd <repo-folder>
+docker compose up -d
+
+# 2. Backend: http://localhost:4000
+cd server
+cp .env.example .env      # defaults point at the docker-compose database
+npm install
+npm run db:migrate        # create the tables
+npm run db:seed           # optional: load sample tasks
+npm run dev
+
+# 3. Frontend: http://localhost:5173 (in a second terminal)
+cd Frontend
+npm install
+npm run dev
+```
+
+Open **http://localhost:5173** in **two browser windows** side by side to see real-time collaboration.
+
+> **npm 11+ only:** install scripts must be approved once.
+> In `server/`: `npm approve-scripts prisma @prisma/client @prisma/engines esbuild && npm rebuild`
+> In `Frontend/`: `npm approve-scripts esbuild && npm rebuild`
+
+### Run the tests
+
+```bash
+cd Frontend
+npm test
+```
+
+### Things to try
+
+| Try this | What you should see |
+|---|---|
+| Drag a card in window A | It moves instantly in A, then appears in window B and briefly highlights there. |
+| Keep making changes | With `FAIL_RATE=0.1` (the default in `.env.example`), about 1 in 10 writes fails on purpose. The card jumps back and a red toast offers **Retry**. |
+| Search or filter, then refresh | Search text and filters are restored from the URL. |
+| Open the same task in both windows, edit the title in A and save | B updates the title unless that field was being edited there; then B shows a conflict warning. |
+
+---
+
+## 2. What is complete and what is not
+
+### Complete
+
+| # | Requirement | Status | Notes |
+|---|---|---|---|
+| 1 | Board | ✅ | Fetched from `GET /api/board`, grouped into Backlog / Todo / In Progress / Done; create, edit and delete. |
+| 2 | Drag and drop | ✅ | Move between columns and reorder within a column (mouse, touch and keyboard). Persisted with one `PATCH { status, position }`. |
+| 3 | Search and filters | ✅ | Title search, priority filter and assignee filter (including "Unassigned"), all combined. |
+| 4 | Task details | ✅ | Clicking a card opens a side drawer to edit title, description, priority, assignee and status, or delete the task. |
+| 5 | Optimistic updates | ✅ | Every create, update, move and delete shows instantly; on failure it rolls back with an error toast and a **Retry** action. |
+| 6 | Real-time collaboration | ✅ | SSE stream; reconnects automatically and replays missed events. |
+| 7 | URL state | ✅ | `?q=&priority=&assignee=` survive a refresh. The open task (`?task=<id>`) is in the URL too. |
+| – | Backend API | ✅ | All five endpoints, PostgreSQL, validation, configurable random failures (`FAIL_RATE`). |
+
+**Extras:** live connection indicator, edit-conflict warning in the drawer, highlight on cards changed by other users, dark/light theme toggle, loading skeleton and error state, unit tests for the sync engine.
+
+### Not complete / known limitations
+
+- **No authentication.** Assignee is a free-text name and every visitor sees the same board.
+- **Single backend instance.** The SSE broker and its replay buffer live in memory. Several instances would need a shared channel such as Postgres `LISTEN/NOTIFY` or Redis pub/sub.
+- **Drag and drop is last-write-wins.** Moves don't send `version`, so if two people move the same card at the same moment, the later request wins. Every client still ends up showing the server's final state.
+- **Filters are single-select.** One priority and one assignee at a time.
+- **No end-to-end tests.** Only the sync engine and positioning logic have unit tests; the API was tested manually with curl.
+
+---
+
+## 3. How I handled optimistic updates and rollback
+
+The logic is in [`Frontend/src/lib/sync.ts`](Frontend/src/lib/sync.ts) and is used by [`Frontend/src/hooks/useTaskActions.tsx`](Frontend/src/hooks/useTaskActions.tsx).
+
+### Two views of every task
+
+1. **`known`**: the latest copy the **server** has confirmed, from `GET /board`, mutation responses and SSE events. It only moves forward in `version`.
+2. **The TanStack Query cache**: what the **user sees**, equal to `known` plus any local optimistic changes.
+
+### What every action does (create / edit / move / delete)
+
+1. **Mark the task as pending** (an in-flight counter per task id).
+2. **Apply the change to the cache immediately, synchronously.** The UI updates at once, and a dropped card never flickers back to its old place.
+3. **Send the request** through a TanStack Query mutation.
+4. **On success**, store the server's response in `known`.
+5. **On error**, show a toast ("Couldn't update …, your change was reverted") with a **Retry** button.
+6. **When the last request for that task finishes**, successful or not, set the cache back to `known`.
+
+Step 6 handles both success and rollback. After a failure, `known` still holds the server state from before the change, **plus any changes other users made in the meantime**. So a rollback only undoes *your* change. It never erases someone else's edit, which restoring a snapshot of the whole board would.
+
+### Supporting details
+
+- **Client-generated UUIDs for new tasks.** The optimistic card already has its real id, so nothing needs swapping when the server answers.
+- **Fractional positions.** A dropped card gets the midpoint between its new neighbours (e.g. `1500` between `1000` and `2000`), so a move changes one row. Neighbours come from the *full* column, so tasks hidden by filters keep their order. If two positions get closer than `1e-6`, the server renumbers the column and broadcasts the changes.
+- **A `404` on update or delete** means another user deleted the task, so it's removed locally instead of restored.
+- **Simulated failures** (`FAIL_RATE`) are rejected before the database is touched, so a failed request never partly applies.
+
+---
+
+## 4. How I handled real-time events without overwriting local changes
+
+Events arrive on `GET /api/events` ([`Frontend/src/hooks/useRealtime.ts`](Frontend/src/hooks/useRealtime.ts)) and pass through the same sync engine as the mutations.
+
+1. **Tasks being saved are protected.** If a task has a request in flight, an incoming event only updates `known`; what the user sees is left alone. When the request finishes, the task switches to the newest server state, which includes both our change and the other user's.
+2. **Old and duplicate events are ignored, using `version`.** An event is applied only if its `version` is newer than what we already know, so out-of-order messages and echoes of our own writes do nothing.
+3. **Deleted tasks stay deleted.** A delete is remembered (a "tombstone"), so a late update event can't bring the task back.
+4. **Refetching the board doesn't overwrite local changes.** When the whole board is reloaded (after connecting, or when the server asks for a `resync`), events that arrive during the request are buffered and re-applied on top of the response. Tasks still being saved keep their optimistic copy.
+5. **Missed events are replayed after a reconnect.** Every event has an id `<serverId>-<seq>`. On reconnect the browser sends `Last-Event-ID` and the server replays from a buffer of the last 1,000 events. If it can't (server restarted, or the gap is too old), it sends `resync` and the client reloads the board.
+6. **Each browser tab has its own `X-Client-Id`.** The server includes it on the events that request caused. It's used to highlight only *other people's* changes; correctness doesn't depend on it, because the version check already handles our own echoes.
+7. **Editing in the drawer.** The drawer edits a local draft. When an update from another user arrives:
+   - fields you haven't touched take the new value;
+   - fields you have edited keep your value and are flagged ("Another user changed the title while you were editing"), with a **Use their version** button.
+
+   Saving sends **only the fields you changed**, so other users' edits to other fields are kept.
+
+These rules are covered by unit tests in [`Frontend/src/lib/sync.test.ts`](Frontend/src/lib/sync.test.ts), for example *"does not overwrite an optimistic change while the mutation is in flight"* and *"rolls back a failed mutation to the latest server state (keeping remote changes)"*.
+
+---
+
+## 5. Which coding agents I used
+
+**Claude Code** (Anthropic) was used throughout:
+
+- analysing the brief and choosing the tech stack and database;
+- writing the unit tests and running manual API / SSE checks;
+- writing this README.
+
+Design decisions (stack, build order, features) were reviewed and directed by me.
+
+---
+
+## Reference
+
+### Tech stack
 
 | Layer | Choice |
 |---|---|
@@ -17,11 +168,11 @@ A real-time collaborative Kanban board. Several users can view and edit the same
 | URL state | React Router (`useSearchParams`) |
 | Styling / UI | Tailwind CSS v4, Radix UI Dialog (drawer + modal), sonner (toasts) |
 | Backend | Node.js, TypeScript, Express 5 |
-| Database | PostgreSQL 16 via Prisma |
+| Database | PostgreSQL via Prisma |
 | Validation | zod |
 | Real-time | Server-Sent Events (`GET /api/events`) + native `EventSource` |
 
-## Project structure
+### Project structure
 
 ```
 .
@@ -35,161 +186,49 @@ A real-time collaborative Kanban board. Several users can view and edit the same
 │       └── middleware/       # failure simulation, latency, errors, client id
 └── Frontend/                 # React app
     └── src/
-        ├── lib/sync.ts       # optimistic update + realtime reconciliation engine
+        ├── lib/sync.ts       # optimistic update + real-time reconciliation
         ├── hooks/            # useBoard, useRealtime, useTaskActions, useUrlState, useTheme
         └── components/       # Board, TaskCard, TaskDrawer, CreateTaskDialog, Toolbar, ...
 ```
 
----
+### API
 
-## How to install and run
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/board` | `{ columns, tasks }`; tasks sorted by column, then position |
+| `POST` | `/api/tasks` | Create a task. Accepts an optional client-generated `id` (UUID) and `position`. |
+| `PATCH` | `/api/tasks/:id` | Partial update (title, description, priority, assignee, status, position). Optional `version` → `409` if stale. |
+| `DELETE` | `/api/tasks/:id` | Delete → `204` |
+| `GET` | `/api/events` | SSE stream of `task.created`, `task.updated`, `task.deleted` |
 
-**Prerequisites:** Node.js 20+ and Docker (for PostgreSQL). If you have your own Postgres, skip step 1 and set `DATABASE_URL` instead.
-
-```bash
-# 1. Start PostgreSQL (from the repo root)
-docker compose up -d
-
-# 2. Backend: http://localhost:4000
-cd server
-cp .env.example .env
-npm install
-npm run db:migrate        # create tables
-npm run db:seed           # optional: sample tasks
-npm run dev
-
-# 3. Frontend: http://localhost:5173 (in a second terminal)
-cd Frontend
-npm install
-npm run dev
-```
-
-Open http://localhost:5173 in **two browser windows** to see real-time collaboration.
-
-> On npm 11+, install scripts must be approved once: `npm approve-scripts prisma @prisma/client @prisma/engines esbuild` (server) and `npm approve-scripts esbuild` (Frontend), then `npm rebuild`.
+Besides the fields in the brief, every task has a server-managed **`version`** that goes up on each write. Writes are compare-and-swap on `(id, version)` inside a transaction. Errors use the shape `{ error, message, details? }`: `400` validation, `404` not found, `409` conflict, `503` simulated failure.
 
 ### Environment variables
 
-**server/.env**
+**`server/.env`**
 
 | Variable | Default | Description |
 |---|---|---|
 | `DATABASE_URL` | – | PostgreSQL connection string |
 | `PORT` | `4000` | API port |
 | `CLIENT_ORIGIN` | `http://localhost:5173` | Allowed CORS origins (comma-separated, `*` for any) |
-| `FAIL_RATE` | `0` (`.env.example`: `0.1`) | Probability (0–1) that a write request fails with `503`, to exercise rollback |
-| `FAIL_METHODS` | `POST,PATCH,DELETE` | HTTP methods eligible for simulated failure |
+| `FAIL_RATE` | `0` (`.env.example`: `0.1`) | Probability (0–1) that a write fails with `503`, to test rollback |
+| `FAIL_METHODS` | `POST,PATCH,DELETE` | HTTP methods that may fail |
 | `LATENCY_MS` | `0` (`.env.example`: `300`) | Artificial delay per request, so optimistic UI is visible |
 
 A single request can force the outcome with the header `X-Simulate-Failure: always` or `X-Simulate-Failure: never`.
 
-**Frontend/.env** (optional)
+**`Frontend/.env`** (optional)
 
 | Variable | Description |
 |---|---|
-| `VITE_API_URL` | API base URL. Leave empty locally (Vite proxies `/api` to `:4000`); set it to the backend URL in production. |
+| `VITE_API_URL` | API base URL. Leave empty locally (Vite proxies `/api` to port 4000); set it to the backend URL in production. |
 
 ### Scripts
 
 | Where | Command | What it does |
 |---|---|---|
-| server | `npm run dev` / `build` / `start` | Dev server (watch) / compile / run compiled |
-| server | `npm run db:migrate` / `db:seed` / `db:reset` | Prisma migrations / sample data / reset DB |
-| Frontend | `npm run dev` / `build` / `preview` | Dev server / production build / serve build |
-| Frontend | `npm test` | Unit tests for the sync engine and position logic (Vitest) |
-
----
-
-## API
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/board` | `{ columns, tasks }`; tasks sorted by column, then position |
-| `POST` | `/api/tasks` | Create a task. Accepts an optional client-generated `id` (UUID) and `position`. |
-| `PATCH` | `/api/tasks/:id` | Partial update (any of title, description, priority, assignee, status, position). Optional `version` returns `409` if stale. |
-| `DELETE` | `/api/tasks/:id` | Delete → `204` |
-| `GET` | `/api/events` | SSE stream of `task.created`, `task.updated`, `task.deleted` |
-
-Every task carries a server-managed **`version`**, incremented on each write, in addition to the fields in the brief. Writes are compare-and-swap on `(id, version)` in a transaction. Errors use the shape `{ error, message, details? }`: `400` validation, `404` not found, `409` conflict, `503` simulated failure.
-
----
-
-## What is complete and what is not
-
-### Complete
-
-- **Board:** fetch from the API, tasks grouped into Backlog / Todo / In Progress / Done; create, edit and delete.
-- **Drag and drop:** move between columns and reorder within a column (mouse, touch and keyboard); persisted with a single `PATCH { status, position }`.
-- **Search and filters:** title search plus priority and assignee filters (including "Unassigned"), all combined.
-- **Task details:** clicking a card opens a side drawer to edit title, description, priority, assignee and status, or delete the task.
-- **Optimistic updates:** every create, update, move and delete shows instantly; on failure it rolls back and shows an error toast with a **Retry** action.
-- **Real-time collaboration:** SSE stream, automatic reconnect with replay of missed events; changes from other users briefly highlight the card.
-- **URL state:** `?q=&priority=&assignee=` survive a refresh. The open task (`?task=<id>`) is also kept in the URL, so links can be shared.
-- **Extras:** live connection indicator, edit-conflict warning in the drawer, dark/light theme toggle, loading skeleton and error state, unit tests for the sync engine.
-
-### Not complete / known limitations
-
-- **No authentication.** Assignee is a free-text name and every visitor sees the same board.
-- **Single backend instance.** The SSE broker and its replay buffer are in memory. Running several instances would need a shared channel such as Postgres `LISTEN/NOTIFY` or Redis pub/sub.
-- **Drag-and-drop is last-write-wins.** Moves don't send `version`, so two people moving the same card at the same moment both "win" in order. The board still converges to the server's final state.
-- **Filters are single-select.** One priority and one assignee at a time.
-- **No end-to-end tests.** Only the sync engine and positioning logic have unit tests; the API was tested manually with curl.
-
----
-
-## How optimistic updates and rollback work
-
-The core is [`Frontend/src/lib/sync.ts`](Frontend/src/lib/sync.ts), used by [`useTaskActions.tsx`](Frontend/src/hooks/useTaskActions.tsx).
-
-The client keeps **two views** of every task:
-
-1. **`known`**: the latest copy the server has confirmed, from `GET /board`, mutation responses and SSE events. It only moves forward in `version`.
-2. **The TanStack Query cache**: what the user sees, equal to `known` plus local optimistic changes.
-
-Every action (create / update / move / delete) does this:
-
-1. **Mark the task as pending** (an in-flight counter per task id).
-2. **Apply the change to the cache synchronously.** The UI updates instantly; a dropped card never flickers back.
-3. **Send the request** through a TanStack Query mutation.
-4. **On success**, store the server's response in `known`.
-5. **On error**, show a toast ("Couldn't update …, your change was reverted") with a Retry button.
-6. **When the last request for that task settles**, successful or not, set the cache to `known`.
-
-Step 6 handles both success and rollback. After a failure, `known` still holds the pre-change server state **plus any changes other users made in the meantime**. So a rollback only reverts *your* change; it never wipes out someone else's edit the way restoring a whole-board snapshot would.
-
-Other details:
-
-- **Client-generated UUIDs for new tasks.** The optimistic card already has its real id, so there's no temporary-id swap.
-- **Fractional positions.** A dropped card gets the midpoint of its new neighbours' positions (e.g. `1500` between `1000` and `2000`), so a move updates one row. Neighbours are taken from the *full* column, so tasks hidden by filters keep their order. When gaps get too small (< `1e-6`) the server renumbers the column and broadcasts the changes.
-- **A `404` on update or delete** (another user deleted the task) removes it locally instead of restoring it.
-- **Simulated failures** (`FAIL_RATE`) are rejected before the database is touched, so a failed request never partially applies.
-
-## How real-time events avoid overwriting local changes
-
-Events arrive on `GET /api/events` ([`useRealtime.ts`](Frontend/src/hooks/useRealtime.ts)) and pass through the same sync engine.
-
-1. **Pending tasks are protected.** If a task has an in-flight request, the event only updates `known`; the cache, and so the user's optimistic state, is left alone. When the request settles, the task is reconciled to the newest server state, which then includes both our write and the other user's.
-2. **Stale and duplicate events are dropped by `version`.** An event is applied only if its `version` is newer than what we already know. Out-of-order messages and echoes of our own writes are harmless.
-3. **Deletes leave tombstones.** A late `task.updated` can't bring back a deleted task.
-4. **Refetches don't clobber either.** When the board is refetched (first connect or `resync`), events that arrive during the request are buffered and replayed on top of the response, and pending tasks keep their optimistic copy.
-5. **Missed events are replayed.** Each event has an id `<serverId>-<seq>`. On reconnect the browser sends `Last-Event-ID` and the server replays from a 1,000-event buffer. If it can't (server restarted, or the gap is too old) it sends `resync` and the client refetches the board.
-6. **Each tab has its own `X-Client-Id`.** The server echoes it on events. It is used to highlight only *other users'* changes; correctness doesn't depend on it, because the version check already handles our own echoes.
-7. **Editing in the drawer.** The drawer edits a local draft. When a remote update arrives:
-   - fields the user hasn't touched take the new value;
-   - fields the user has edited keep the local value and are flagged ("Another user changed the title while you were editing", with a *Use their version* button).
-
-   Saving sends **only the changed fields**, so other users' edits to other fields are preserved.
-
-These rules are covered by unit tests in [`Frontend/src/lib/sync.test.ts`](Frontend/src/lib/sync.test.ts), for example "does not overwrite an optimistic change while the mutation is in flight" and "rolls back a failed mutation to the latest server state (keeping remote changes)".
-
----
-
-## Coding agents used
-
-**Claude Code** (Anthropic) was used throughout:
-
-- analysing the brief and choosing the tech stack and database;
-- writing the unit tests and running manual API / SSE checks;
-- writing this README.
-
-Design decisions (stack, build order, features) were reviewed and directed by me.
+| server | `npm run dev` / `build` / `start` | Dev server (watch) / compile / run compiled build |
+| server | `npm run db:migrate` / `db:seed` / `db:reset` | Apply migrations / load sample data / reset the database |
+| Frontend | `npm run dev` / `build` / `preview` | Dev server / production build / serve the build |
+| Frontend | `npm test` | Unit tests (Vitest) |
