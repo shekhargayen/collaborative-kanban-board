@@ -4,6 +4,13 @@ A real-time collaborative Kanban board. Several users can view and edit the same
 
 **Stack:** React 18 + TypeScript + Vite · TanStack Query · dnd-kit · Tailwind CSS · Node.js + Express · PostgreSQL + Prisma · Server-Sent Events
 
+| | Link |
+|---|---|
+| **Live app** | https://collaborative-kanban-board-aeny.vercel.app |
+| **API** | https://collaborative-kanban-board-i3kk.vercel.app ([`/api/board`](https://collaborative-kanban-board-i3kk.vercel.app/api/board)) |
+
+> Open the live app in **two browser windows** to see real-time updates. The free API may take a few seconds on the first request while it starts up.
+
 ## Contents
 
 1. [How to install and run the project](#1-how-to-install-and-run-the-project)
