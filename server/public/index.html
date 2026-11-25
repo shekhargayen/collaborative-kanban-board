@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kanban API</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; color: #0f172a; }
+      code { background: #f1f5f9; padding: 0.1rem 0.3rem; border-radius: 4px; }
+      @media (prefers-color-scheme: dark) { body { background: #020617; color: #e2e8f0; } code { background: #1e293b; } }
+    </style>
+  </head>
+  <body>
+    <h1>Kanban API</h1>
+    <p>Backend for the collaborative Kanban board.</p>
+    <ul>
+      <li><code>GET /api/board</code></li>
+      <li><code>POST /api/tasks</code></li>
+      <li><code>PATCH /api/tasks/:id</code></li>
+      <li><code>DELETE /api/tasks/:id</code></li>
+      <li><code>GET /api/events</code> (Server-Sent Events)</li>
+      <li><code>GET /api/health</code></li>
+    </ul>
+  </body>
+</html>

@@ -37,3 +37,16 @@ model Task {
 
   @@index([status, position])
 }
+
+/// Append-only log of board changes. Streamed to clients over SSE; `seq` is the SSE event id.
+/// Lives in Postgres (not memory) so every server instance - e.g. each Vercel function - sees the same events.
+model BoardEvent {
+  seq       BigInt   @id @default(autoincrement())
+  type      String
+  payload   Json
+  clientId  String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("board_events")
+}

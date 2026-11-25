@@ -50,6 +50,30 @@ Open **http://localhost:5173** in **two browser windows** side by side to see re
 > In `server/`: `npm approve-scripts prisma @prisma/client @prisma/engines esbuild && npm rebuild`
 > In `Frontend/`: `npm approve-scripts esbuild && npm rebuild`
 
+### Deploy (Vercel + any PostgreSQL)
+
+The repo deploys as **two Vercel projects** from the same GitHub repository. The database used here is a free **Aiven PostgreSQL** service; any PostgreSQL works.
+
+**1. Backend** (Vercel → Add New → Project → import the repo)
+
+| Setting | Value |
+|---|---|
+| Root Directory | `server` |
+| Framework Preset | Other (build settings come from [`server/vercel.json`](server/vercel.json)) |
+| Environment variables | `DATABASE_URL` = Postgres URI (with `?sslmode=require` for managed databases) · `CLIENT_ORIGIN` = frontend URL (or `*`) · `FAIL_RATE` = `0.1` |
+
+The build runs `prisma generate && prisma migrate deploy`, so tables are created automatically. The function region should be close to the database (Settings → Functions → Region).
+
+**2. Frontend** (another new project from the same repo)
+
+| Setting | Value |
+|---|---|
+| Root Directory | `Frontend` |
+| Framework Preset | Vite |
+| Environment variables | `VITE_API_URL` = backend URL, e.g. `https://kanban-api.vercel.app` |
+
+After the frontend has its URL, set `CLIENT_ORIGIN` on the backend to it and redeploy the backend.
+
 ### Run the tests
 
 ```bash
@@ -88,7 +112,6 @@ npm test
 ### Not complete / known limitations
 
 - **No authentication.** Assignee is a free-text name and every visitor sees the same board.
-- **Single backend instance.** The SSE broker and its replay buffer live in memory. Several instances would need a shared channel such as Postgres `LISTEN/NOTIFY` or Redis pub/sub.
 - **Drag and drop is last-write-wins.** Moves don't send `version`, so if two people move the same card at the same moment, the later request wins. Every client still ends up showing the server's final state.
 - **Filters are single-select.** One priority and one assignee at a time.
 - **No end-to-end tests.** Only the sync engine and positioning logic have unit tests; the API was tested manually with curl.
@@ -132,13 +155,23 @@ Events arrive on `GET /api/events` ([`Frontend/src/hooks/useRealtime.ts`](Fronte
 2. **Old and duplicate events are ignored, using `version`.** An event is applied only if its `version` is newer than what we already know, so out-of-order messages and echoes of our own writes do nothing.
 3. **Deleted tasks stay deleted.** A delete is remembered (a "tombstone"), so a late update event can't bring the task back.
 4. **Refetching the board doesn't overwrite local changes.** When the whole board is reloaded (after connecting, or when the server asks for a `resync`), events that arrive during the request are buffered and re-applied on top of the response. Tasks still being saved keep their optimistic copy.
-5. **Missed events are replayed after a reconnect.** Every event has an id `<serverId>-<seq>`. On reconnect the browser sends `Last-Event-ID` and the server replays from a buffer of the last 1,000 events. If it can't (server restarted, or the gap is too old), it sends `resync` and the client reloads the board.
+5. **Missed events are replayed after a reconnect.** Every event is stored in a `board_events` table and its `seq` is the SSE event id. On reconnect the browser sends `Last-Event-ID` and the server streams everything after it, straight from the database. If it can't (the database was reset, or events older than 24 hours were trimmed), it sends `resync` and the client reloads the board.
 6. **Each browser tab has its own `X-Client-Id`.** The server includes it on the events that request caused. It's used to highlight only *other people's* changes; correctness doesn't depend on it, because the version check already handles our own echoes.
 7. **Editing in the drawer.** The drawer edits a local draft. When an update from another user arrives:
    - fields you haven't touched take the new value;
    - fields you have edited keep your value and are flagged ("Another user changed the title while you were editing"), with a **Use their version** button.
 
    Saving sends **only the fields you changed**, so other users' edits to other fields are kept.
+
+### How the server delivers events (works on serverless)
+
+On Vercel the API runs as many short-lived function instances, so events can't live in one server's memory. Instead:
+
+1. **Each write records its events in the same database transaction.** An event exists if and only if the change was saved. A board-wide Postgres advisory lock makes writes commit one at a time, so event numbers (`seq`) appear in order and a reader never skips one.
+2. **Postgres `NOTIFY` wakes every instance.** Each instance that has users connected keeps one `LISTEN` connection, and every open stream on it immediately fetches the events after its own cursor. If `LISTEN` is unavailable, streams check for new events every 2 seconds instead.
+3. **Streams end on purpose before Vercel's time limit** (`SSE_MAX_MS`, 55 s on Vercel). The browser reconnects within a second with `Last-Event-ID` and continues where it left off.
+
+Tested locally with two server instances: a change saved on one reached a user connected to the other in about 60 ms, and 40 simultaneous writes split across both instances arrived in order with no gaps or duplicates.
 
 These rules are covered by unit tests in [`Frontend/src/lib/sync.test.ts`](Frontend/src/lib/sync.test.ts), for example *"does not overwrite an optimistic change while the mutation is in flight"* and *"rolls back a failed mutation to the latest server state (keeping remote changes)"*.
 
@@ -178,11 +211,12 @@ Design decisions (stack, build order, features) were reviewed and directed by me
 .
 ├── docker-compose.yml        # local PostgreSQL
 ├── server/                   # Express API
+│   ├── api/index.ts          # Vercel serverless entry point
 │   ├── prisma/               # schema, migrations, seed
 │   └── src/
 │       ├── routes/           # board, tasks, events
 │       ├── services/         # all DB logic (taskService.ts)
-│       ├── realtime/         # SSE broker (broker.ts)
+│       ├── realtime/         # event log, LISTEN/NOTIFY, SSE stream
 │       └── middleware/       # failure simulation, latency, errors, client id
 └── Frontend/                 # React app
     └── src/
@@ -215,6 +249,10 @@ Besides the fields in the brief, every task has a server-managed **`version`** t
 | `FAIL_RATE` | `0` (`.env.example`: `0.1`) | Probability (0–1) that a write fails with `503`, to test rollback |
 | `FAIL_METHODS` | `POST,PATCH,DELETE` | HTTP methods that may fail |
 | `LATENCY_MS` | `0` (`.env.example`: `300`) | Artificial delay per request, so optimistic UI is visible |
+| `SSE_MAX_MS` | `0` (`55000` on Vercel) | End each event stream after this many ms; the browser reconnects without losing events |
+| `EVENT_POLL_MS` | `2000` | Fallback check for new events if Postgres `LISTEN` is unavailable |
+| `DB_POOL_SIZE` | `5` | Max database connections per server instance |
+| `DATABASE_CA_CERT` | – | Optional PEM certificate to verify the database's TLS certificate |
 
 A single request can force the outcome with the header `X-Simulate-Failure: always` or `X-Simulate-Failure: never`.
 

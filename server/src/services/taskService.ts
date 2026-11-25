@@ -4,11 +4,37 @@ import { MIN_POSITION_GAP, POSITION_GAP, type TaskStatus } from "../lib/constant
 import { HttpError, notFound } from "../lib/errors.js";
 import type { CreateTaskInput, UpdateTaskInput } from "../lib/schemas.js";
 import { toTaskDTO } from "../lib/task.js";
+import { recordEvents, type BoardEventPayload } from "../realtime/events.js";
 
 type Tx = Prisma.TransactionClient;
 
 /** Result of a write: the task itself plus other tasks whose position changed (column rebalance). */
-export type WriteResult = { task: Task; rebalanced: Task[] };
+type WriteResult = { task: Task; rebalanced: Task[] };
+
+/** Arbitrary constant identifying the board-wide write lock. */
+const BOARD_LOCK_KEY = 7151001;
+const TX_OPTIONS = { maxWait: 10_000, timeout: 15_000 };
+
+/**
+ * Every write runs in a transaction that
+ *  1. takes a board-wide advisory lock, so writes (and their event `seq`s) commit in order;
+ *  2. performs the change;
+ *  3. appends the resulting realtime events and NOTIFYs listeners (delivered on commit).
+ */
+async function boardWrite<T>(
+  clientId: string | null,
+  fn: (tx: Tx) => Promise<{ result: T; events: BoardEventPayload[] }>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${BOARD_LOCK_KEY})`);
+    const { result, events } = await fn(tx);
+    await recordEvents(tx, events, clientId);
+    return result;
+  }, TX_OPTIONS);
+}
+
+const updatedEvents = (tasks: Task[]): BoardEventPayload[] =>
+  tasks.map((t) => ({ type: "task.updated", task: toTaskDTO(t) }));
 
 const conflict = (current: Task) =>
   new HttpError(409, "Conflict", "Task was modified by another user", { task: toTaskDTO(current) });
@@ -64,18 +90,22 @@ async function rebalanceIfNeeded(tx: Tx, task: Task): Promise<WriteResult> {
   return { task: moved, rebalanced };
 }
 
-export async function createTask(input: CreateTaskInput): Promise<WriteResult> {
-  return prisma.$transaction(async (tx) => {
+export async function createTask(input: CreateTaskInput, clientId: string | null): Promise<Task> {
+  return boardWrite(clientId, async (tx) => {
     const position = input.position ?? (await endOfColumn(tx, input.status));
-    const task = await tx.task.create({ data: { ...input, position } });
-    return rebalanceIfNeeded(tx, task);
+    const created = await tx.task.create({ data: { ...input, position } });
+    const { task, rebalanced } = await rebalanceIfNeeded(tx, created);
+    return {
+      result: task,
+      events: [{ type: "task.created", task: toTaskDTO(task) }, ...updatedEvents(rebalanced)],
+    };
   });
 }
 
-export async function updateTask(id: string, input: UpdateTaskInput): Promise<WriteResult> {
+export async function updateTask(id: string, input: UpdateTaskInput, clientId: string | null): Promise<Task> {
   const { version: expectedVersion, ...patch } = input;
 
-  return prisma.$transaction(async (tx) => {
+  return boardWrite(clientId, async (tx) => {
     const current = await tx.task.findUnique({ where: { id } });
     if (!current) throw notFound();
     if (expectedVersion !== undefined && expectedVersion !== current.version) throw conflict(current);
@@ -96,14 +126,15 @@ export async function updateTask(id: string, input: UpdateTaskInput): Promise<Wr
       throw latest ? conflict(latest) : notFound();
     }
 
-    const task = await tx.task.findUniqueOrThrow({ where: { id } });
-    if (patch.position === undefined && data.position === undefined) return { task, rebalanced: [] };
-    return rebalanceIfNeeded(tx, task);
+    const updated = await tx.task.findUniqueOrThrow({ where: { id } });
+    const moved = patch.position !== undefined || data.position !== undefined;
+    const { task, rebalanced } = moved ? await rebalanceIfNeeded(tx, updated) : { task: updated, rebalanced: [] };
+    return { result: task, events: updatedEvents([task, ...rebalanced]) };
   });
 }
 
-export async function deleteTask(id: string, expectedVersion?: number): Promise<Task> {
-  return prisma.$transaction(async (tx) => {
+export async function deleteTask(id: string, expectedVersion: number | undefined, clientId: string | null): Promise<Task> {
+  return boardWrite(clientId, async (tx) => {
     const current = await tx.task.findUnique({ where: { id } });
     if (!current) throw notFound();
     if (expectedVersion !== undefined && expectedVersion !== current.version) throw conflict(current);
@@ -113,6 +144,6 @@ export async function deleteTask(id: string, expectedVersion?: number): Promise<
       const latest = await tx.task.findUnique({ where: { id } });
       throw latest ? conflict(latest) : notFound();
     }
-    return current;
+    return { result: current, events: [{ type: "task.deleted", id: current.id, version: current.version }] };
   });
 }

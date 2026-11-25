@@ -7,6 +7,8 @@ import type { StreamMessage } from "../lib/types";
 export type ConnectionState = "connecting" | "live" | "reconnecting";
 
 const RECONNECT_MS = 3000;
+/** Streams end on purpose (e.g. every ~55s on Vercel) and reconnect at once; only show "Reconnecting" if it takes longer. */
+const RECONNECTING_UI_DELAY_MS = 3000;
 
 /**
  * Subscribes to GET /api/events (Server-Sent Events) and feeds every event to the sync engine.
@@ -22,6 +24,7 @@ export function useRealtime(): ConnectionState {
     let es: EventSource | null = null;
     let lastEventId = "";
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectingTimer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
     let connectedOnce = false;
 
@@ -42,6 +45,8 @@ export function useRealtime(): ConnectionState {
         }
         switch (msg.type) {
           case "connected":
+            clearTimeout(reconnectingTimer);
+            reconnectingTimer = undefined;
             setState("live");
             // Close the gap between the initial GET /board and the stream opening.
             if (!connectedOnce && qc.getQueryData(BOARD_KEY)) void refetchBoard();
@@ -57,7 +62,7 @@ export function useRealtime(): ConnectionState {
 
       es.onerror = () => {
         if (disposed) return;
-        setState("reconnecting");
+        reconnectingTimer ??= setTimeout(() => setState("reconnecting"), RECONNECTING_UI_DELAY_MS);
         if (es?.readyState === EventSource.CLOSED) {
           es.close();
           retryTimer = setTimeout(connect, RECONNECT_MS);
@@ -69,6 +74,7 @@ export function useRealtime(): ConnectionState {
     return () => {
       disposed = true;
       clearTimeout(retryTimer);
+      clearTimeout(reconnectingTimer);
       es?.close();
     };
   }, [qc]);

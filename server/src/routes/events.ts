@@ -1,7 +1,5 @@
 import type { RequestHandler } from "express";
-import { broker } from "../realtime/broker.js";
+import { streamEvents } from "../realtime/stream.js";
 
 /** GET /api/events → Server-Sent Events stream of task.created / task.updated / task.deleted */
-export const eventsHandler: RequestHandler = (req, res) => {
-  broker.subscribe(req, res);
-};
+export const eventsHandler: RequestHandler = (req, res) => streamEvents(req, res);

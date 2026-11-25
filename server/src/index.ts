@@ -1,7 +1,8 @@
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { prisma } from "./db.js";
-import { broker } from "./realtime/broker.js";
+import { notifier } from "./realtime/notifier.js";
+import { closeAllStreams } from "./realtime/stream.js";
 
 const app = createApp();
 
@@ -12,8 +13,9 @@ const server = app.listen(config.port, () => {
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down...`);
-  broker.closeAll(); // end SSE streams so server.close() can finish
+  closeAllStreams(); // end SSE streams so server.close() can finish
   server.close(async () => {
+    await notifier.close();
     await prisma.$disconnect();
     process.exit(0);
   });

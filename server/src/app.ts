@@ -6,7 +6,7 @@ import { clientId } from "./middleware/clientId.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { failureSimulation } from "./middleware/failureSimulation.js";
 import { latency } from "./middleware/latency.js";
-import { broker } from "./realtime/broker.js";
+import { streamCount } from "./realtime/stream.js";
 import { boardRouter } from "./routes/board.js";
 import { eventsHandler } from "./routes/events.js";
 import { tasksRouter } from "./routes/tasks.js";
@@ -30,7 +30,7 @@ export function createApp() {
   // Not affected by latency / failure simulation.
   app.get("/api/health", async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: "ok", sseClients: broker.clientCount });
+    res.json({ status: "ok", sseClients: streamCount() });
   });
   app.get("/api/events", eventsHandler);
 
