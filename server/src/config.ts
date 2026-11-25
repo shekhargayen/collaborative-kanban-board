@@ -4,7 +4,11 @@ import { z } from "zod";
 const EnvSchema = z.object({
   NODE_ENV: z.string().default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
-  CLIENT_ORIGIN: z.string().default("http://localhost:5173"),
+  /**
+   * Allowed browser origins (comma-separated). `*` = any; `https://*.vercel.app` style wildcards are supported.
+   * The API uses no cookies or credentials, so allowing any origin is safe and is the default.
+   */
+  CLIENT_ORIGIN: z.string().default("*"),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   FAIL_RATE: z.coerce.number().min(0).max(1).default(0),
   FAIL_METHODS: z.string().default("POST,PATCH,DELETE"),
@@ -27,10 +31,20 @@ if (!parsed.success) {
 
 const env = parsed.data;
 
+/** Build a matcher for a comma-separated list of origins, supporting `*` and `*` wildcards inside a pattern. */
+function originMatcher(list: string) {
+  const patterns = list.split(",").map((o) => o.trim().replace(/\/$/, "")).filter(Boolean);
+  if (patterns.includes("*")) return () => true;
+  const regexes = patterns.map(
+    (p) => new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*")}$`, "i"),
+  );
+  return (origin: string) => regexes.some((r) => r.test(origin));
+}
+
 export const config = {
   env: env.NODE_ENV,
   port: env.PORT,
-  clientOrigins: env.CLIENT_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean),
+  isAllowedOrigin: originMatcher(env.CLIENT_ORIGIN),
   failRate: env.FAIL_RATE,
   failMethods: new Set(env.FAIL_METHODS.split(",").map((m) => m.trim().toUpperCase()).filter(Boolean)),
   latencyMs: env.LATENCY_MS,

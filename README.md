@@ -60,7 +60,7 @@ The repo deploys as **two Vercel projects** from the same GitHub repository. The
 |---|---|
 | Root Directory | `server` |
 | Framework Preset | Other (build settings come from [`server/vercel.json`](server/vercel.json)) |
-| Environment variables | `DATABASE_URL` = Postgres URI (with `?sslmode=require` for managed databases) · `CLIENT_ORIGIN` = frontend URL (or `*`) · `FAIL_RATE` = `0.1` |
+| Environment variables | `DATABASE_URL` = Postgres URI (with `?sslmode=require` for managed databases) · `CLIENT_ORIGIN` = `*` (default) or the frontend URL · `FAIL_RATE` = `0.1` |
 
 The build runs `prisma generate && prisma migrate deploy`, so tables are created automatically. The function region should be close to the database (Settings → Functions → Region).
 
@@ -72,7 +72,7 @@ The build runs `prisma generate && prisma migrate deploy`, so tables are created
 | Framework Preset | Vite |
 | Environment variables | `VITE_API_URL` = backend URL, e.g. `https://kanban-api.vercel.app` |
 
-After the frontend has its URL, set `CLIENT_ORIGIN` on the backend to it and redeploy the backend.
+To restrict CORS, set `CLIENT_ORIGIN` on the backend to the frontend URL and redeploy. Environment variable changes only apply after a redeploy.
 
 ### Run the tests
 
@@ -245,7 +245,7 @@ Besides the fields in the brief, every task has a server-managed **`version`** t
 |---|---|---|
 | `DATABASE_URL` | – | PostgreSQL connection string |
 | `PORT` | `4000` | API port |
-| `CLIENT_ORIGIN` | `http://localhost:5173` | Allowed CORS origins (comma-separated, `*` for any) |
+| `CLIENT_ORIGIN` | `*` | Allowed CORS origins, comma-separated. `*` = any (safe: the API uses no cookies); wildcards like `https://*.vercel.app` work |
 | `FAIL_RATE` | `0` (`.env.example`: `0.1`) | Probability (0–1) that a write fails with `503`, to test rollback |
 | `FAIL_METHODS` | `POST,PATCH,DELETE` | HTTP methods that may fail |
 | `LATENCY_MS` | `0` (`.env.example`: `300`) | Artificial delay per request, so optimistic UI is visible |

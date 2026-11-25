@@ -18,8 +18,7 @@ export function createApp() {
 
   app.use(
     cors({
-      origin: (origin, cb) =>
-        cb(null, !origin || config.clientOrigins.includes("*") || config.clientOrigins.includes(origin)),
+      origin: (origin, cb) => cb(null, !origin || config.isAllowedOrigin(origin)),
       methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Content-Type", "X-Client-Id", "X-Simulate-Failure", "Last-Event-ID"],
     }),

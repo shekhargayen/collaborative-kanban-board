@@ -26,7 +26,7 @@ export function Toolbar({ assignees, visible, total }: { assignees: string[]; vi
         value={filters.priority}
         onChange={(e) => setFilters({ priority: e.target.value as Priority | "" })}
         aria-label="Filter by priority"
-        className={cx(inputClass, "w-auto min-w-36", filters.priority && "border-indigo-400 bg-indigo-50 dark:bg-indigo-500/15")}
+        className={cx(inputClass, "sm:w-auto sm:min-w-40", filters.priority && "border-indigo-400 bg-indigo-50 dark:bg-indigo-500/15")}
       >
         <option value="">All priorities</option>
         {PRIORITIES.map((p) => (
@@ -40,7 +40,7 @@ export function Toolbar({ assignees, visible, total }: { assignees: string[]; vi
         value={filters.assignee}
         onChange={(e) => setFilters({ assignee: e.target.value })}
         aria-label="Filter by assignee"
-        className={cx(inputClass, "w-auto min-w-36", filters.assignee && "border-indigo-400 bg-indigo-50 dark:bg-indigo-500/15")}
+        className={cx(inputClass, "sm:w-auto sm:min-w-40", filters.assignee && "border-indigo-400 bg-indigo-50 dark:bg-indigo-500/15")}
       >
         <option value="">All assignees</option>
         <option value={UNASSIGNED}>Unassigned</option>

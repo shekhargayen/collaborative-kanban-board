@@ -23,7 +23,7 @@ npm run dev
 | Var | Default | Meaning |
 |---|---|---|
 | `PORT` | 4000 | HTTP port |
-| `CLIENT_ORIGIN` | http://localhost:5173 | Allowed CORS origins (comma-separated, `*` = any) |
+| `CLIENT_ORIGIN` | `*` | Allowed CORS origins (comma-separated, `*` = any, wildcards like `https://*.vercel.app`) |
 | `DATABASE_URL` | – | Postgres connection string |
 | `FAIL_RATE` | 0 | Probability (0..1) that an eligible request fails with 503 |
 | `FAIL_METHODS` | POST,PATCH,DELETE | Methods eligible for simulated failure |
